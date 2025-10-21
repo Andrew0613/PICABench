@@ -245,4 +245,3 @@ Email your `*_analysis*.json` and `*_output*.json` files and model details to:
 ## License
 
 This project is released under the Apache License 2.0.
-# PICABench
