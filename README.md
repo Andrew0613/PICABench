@@ -13,11 +13,10 @@
 <a href="https://huggingface.co/datasets/Andrew613/PICA-100K"><img src="https://img.shields.io/badge/Dataset-PICA--100K-007ec6?style=flat&logo=huggingface" alt="PICA-100K Dataset"></a>
 
 </div>
-
 ---
 
 <div align="center">
-  <img src="https://picabench.github.io/static/img/picabench_teaser.png" alt="PICABench teaser" width="40%" />
+  <img src="https://picabench.github.io/static/img/picabench_teaser.png" alt="PICABench teaser" width="50%" />
 </div>
 
 ## 📋 Table of Contents
