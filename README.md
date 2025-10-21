@@ -3,14 +3,14 @@
   PICABench: How Far Are We from Physically Realistic Image Editing?
 </h1>
 
-<div align="center">
+<p><em>Benchmark, evaluator, and data suite for physically realistic image editing.</em></p>
 
-<i>Benchmark, evaluator, and data suite for physically realistic image editing.</i>
-
-[![Website](https://img.shields.io/badge/Project-Website-007ec6?style=for-the-badge)](https://picabench.github.io)
+[![Huggingface Paper](https://img.shields.io/badge/Paper-2510.17681-ffcc00?style=for-the-badge&logo=huggingface&logoColor=black)](https://huggingface.co/papers/2510.17681)
 [![arXiv](https://img.shields.io/badge/arXiv-2510.17681-b31b1b?style=for-the-badge&logo=arxiv&logoColor=white)](https://arxiv.org/pdf/2510.17681)
-[![Dataset](https://img.shields.io/badge/HF-Dataset%20(PICABench)-ffcc00?style=for-the-badge&logo=huggingface&logoColor=black)](https://huggingface.co/datasets/Andrew613/PICABench)
-[![Dataset](https://img.shields.io/badge/HF-Dataset%20(PICA--100K)-ffcc00?style=for-the-badge&logo=huggingface&logoColor=black)](https://huggingface.co/datasets/Andrew613/PICA-100K)
+[![Website](https://img.shields.io/badge/Project-Website-007ec6?style=for-the-badge)](https://picabench.github.io)
+
+<a href="https://huggingface.co/datasets/Andrew613/PICABench"><img src="https://img.shields.io/badge/Dataset-PICABench-007ec6?style=flat&logo=huggingface" alt="PICABench Dataset"></a>
+<a href="https://huggingface.co/datasets/Andrew613/PICA-100K"><img src="https://img.shields.io/badge/Dataset-PICA--100K-007ec6?style=flat&logo=huggingface" alt="PICA-100K Dataset"></a>
 
 </div>
 
