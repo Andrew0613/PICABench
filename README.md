@@ -86,6 +86,32 @@ pip install vllm transformers
 
 ## Data Preparation
 
+### Generating `meta_info.json` from HuggingFace Dataset
+
+If you've already generated edited images with your model but don't know how to organize them into the `meta_info.json` format required by evaluation scripts, use the provided conversion script:
+
+```bash
+# 1. Install dependencies
+pip install datasets pillow tqdm
+
+# 2. Assuming your model outputs are in outputs/ directory with filenames 00000.jpg, 00001.jpg, ...
+python prepare_meta_info.py \
+  --output_image_dir outputs \
+  --save_dir PICABench_data
+
+# 3. Generated files:
+#   PICABench_data/input_img/       - Input images (automatically saved from HF dataset)
+#   PICABench_data/meta_info.json   - Standard format JSON, ready for evaluation
+```
+
+**Parameters:**
+- `--output_image_dir`: Directory containing your model's edited output images
+- `--save_dir`: Root directory to save `meta_info.json` and input images
+- `--output_name_pattern`: Output image filename pattern (default `{index:05d}.jpg`), supports `{index}` placeholder
+- `--allow_missing`: Allow missing output images, still generate JSON (missing samples will have `output_path` set to `null`)
+
+### `meta_info.json` Format
+
 PICABench expects per-scene metadata in `meta_info.json` plus accompanying images under a shared base directory. Each item should include:
 
 ```jsonc
