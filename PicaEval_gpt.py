@@ -13,15 +13,17 @@ import base64
 import io
 import re
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from PIL import Image, ImageDraw
 from tqdm import tqdm
 from openai import OpenAI
 
-# ---------------------------------------------------------------------------
-# Shared data structures & helpers (kept aligned with PicaEval_qwen)
-# ---------------------------------------------------------------------------
+# ============================================================================
+# :: Shared Data Structures & Helpers (kept aligned with PicaEval_qwen)
+# ============================================================================
 
 IMAGE_PATH_KEYS: Tuple[str, ...] = ("output_path", "output_image_path", "output_img_path")
 JSON_PATTERN = re.compile(r"\{[^{}]*\"answer\"[^{}]*\"explanation\"[^{}]*\}", re.IGNORECASE | re.DOTALL)
@@ -40,10 +42,29 @@ class QATask:
 
 
 def resolve_image_path(item: Dict[str, Any], base_dir: str) -> Optional[str]:
+    base_path = Path(base_dir).expanduser().resolve()
+    base_name = base_path.name
     for key in IMAGE_PATH_KEYS:
-        rel_path = item.get(key)
-        if rel_path:
-            return os.path.join(base_dir, rel_path)
+        raw_path = item.get(key)
+        if not raw_path:
+            continue
+
+        candidate_path = Path(raw_path)
+        if candidate_path.is_absolute():
+            return str(candidate_path)
+
+        normalized_rel = Path(*candidate_path.parts)
+        candidate = base_path / normalized_rel
+        if candidate.exists():
+            return str(candidate)
+
+        rel_parts = normalized_rel.parts
+        if rel_parts and rel_parts[0] == base_name:
+            alt = base_path / Path(*rel_parts[1:])
+            if alt.exists():
+                return str(alt)
+
+        return str(candidate)
     return None
 
 
@@ -212,6 +233,7 @@ def load_image_base64(image_path: str, cache: Dict[str, str]) -> str:
 
 
 def create_structured_prompt(question: str) -> str:
+    """Create a prompt with structured JSON output instructions"""
     json_instruction = (
         "\n\nPlease provide a structured answer in the following JSON format:\n"
         '{"answer": "Yes" or "No", "explanation": "Brief explanation of your reasoning"}\n\n'
@@ -221,8 +243,10 @@ def create_structured_prompt(question: str) -> str:
 
 
 def call_gpt_with_retries(client: OpenAI, prompt: str, image_data_url: str, args) -> str:
+    """Call GPT API with retry logic using OpenAI SDK (responses.create endpoint)"""
     for attempt in range(args.max_attempts):
         try:
+            # Build input payload with text and image
             input_payload = [{
                 "role": "user",
                 "content": [
@@ -230,16 +254,20 @@ def call_gpt_with_retries(client: OpenAI, prompt: str, image_data_url: str, args
                     {"type": "input_image", "image_url": image_data_url},
                 ],
             }]
+            
+            # Call OpenAI Responses API (for GPT-5/o1 models)
             response = client.responses.create(
                 model=args.gpt_model,
                 input=input_payload,
-                reasoning={"effort": args.reasoning_effort},
             )
+            
             return response.output_text.strip()
+            
         except Exception as exc:
             wait_time = (args.retry_backoff ** attempt) + random.uniform(0, 1)
             print(f"GPT call failed ({attempt + 1}/{args.max_attempts}): {exc}; retry in {wait_time:.1f}s")
             time.sleep(wait_time)
+    
     return "Error: all attempts failed"
 
 
@@ -291,42 +319,137 @@ def extract_qa_tasks_annotated(items: List[Dict[str, Any]], image_base_dir: str,
     return qa_tasks
 
 
+def process_single_task(task: QATask, items: List[Dict[str, Any]], base64_cache: Dict[str, str], 
+                        image_base_dir: str, client: OpenAI, args) -> Dict[str, Any]:
+    """Worker function to process a single QA task in thread pool"""
+    try:
+        # Load and encode image
+        base64_str = load_image_base64(task.image_path, base64_cache)
+        data_url = f"data:image/jpeg;base64,{base64_str}"
+        
+        # Create prompt and call GPT
+        prompt = create_structured_prompt(task.question)
+        model_response = call_gpt_with_retries(client, prompt, data_url, args)
+        
+        # Parse response
+        model_answer, model_explanation = parse_structured_response(model_response)
+        
+        # Check correctness
+        gt_clean = task.answer.lower().strip().rstrip('.')
+        model_clean = model_answer.lower().strip().rstrip('.')
+        is_correct = gt_clean == model_clean
+        
+        # Return result
+        result = {
+            "item_index": task.item_index,
+            "qa_field": task.qa_field,
+            "qa_type": task.qa_type,
+            "qa_index": task.qa_index,
+            "model_answer": model_answer,
+            "model_response": model_response,
+            "model_explanation": model_explanation,
+            "is_correct": is_correct,
+        }
+        
+        # Add visualization info if applicable
+        if task.qa_field == "annotated_qa_pairs" and task.source == "visualization":
+            viz_rel_path = os.path.relpath(task.image_path, image_base_dir)
+            result["visualization_path"] = viz_rel_path
+            result["viz_mode"] = args.viz_mode
+        
+        return result
+        
+    except Exception as e:
+        return {
+            "item_index": task.item_index,
+            "qa_field": task.qa_field,
+            "qa_type": task.qa_type,
+            "qa_index": task.qa_index,
+            "error": str(e),
+            "model_answer": "Error",
+            "is_correct": False,
+        }
+
+
 def evaluate_with_gpt(items: List[Dict[str, Any]], image_base_dir: str, args) -> List[Dict[str, Any]]:
+    """Main evaluation function using multi-threading"""
+    # Limit number of items if specified
     if args.max_num is not None:
         items = items[:args.max_num]
+    
+    # Extract QA tasks based on field type
     if args.qa_field == "qa_pairs":
         qa_tasks = extract_qa_tasks_standard(items, image_base_dir)
     elif args.qa_field == "annotated_qa_pairs":
         qa_tasks = extract_qa_tasks_annotated(items, image_base_dir, args.viz_mode, args)
     else:
         raise ValueError(f"Unsupported qa_field: {args.qa_field}")
+    
     if not qa_tasks:
         print("No QA tasks found!")
         return items
+    
     print(f"Found {len(qa_tasks)} QA tasks")
+    
+    # Setup API key
     api_key = args.api_key or os.getenv("OPENAI_API_KEY")
     if not api_key:
         raise RuntimeError("OpenAI API key is required. Set --api_key or OPENAI_API_KEY.")
-    client = OpenAI(api_key=api_key)
+    
+    # Initialize OpenAI client
+    client = OpenAI(api_key=api_key, base_url=args.api_base_url)
+    
+    # Shared base64 cache (thread-safe for reading)
     base64_cache: Dict[str, str] = {}
-    for task in tqdm(qa_tasks, desc="Calling GPT model"):
-        base64_str = load_image_base64(task.image_path, base64_cache)
-        data_url = f"data:image/jpeg;base64,{base64_str}"
-        prompt = create_structured_prompt(task.question)
-        model_response = call_gpt_with_retries(client, prompt, data_url, args)
-        model_answer, model_explanation = parse_structured_response(model_response)
-        gt_clean = task.answer.lower().strip().rstrip('.')
-        model_clean = model_answer.lower().strip().rstrip('.')
-        is_correct = gt_clean == model_clean
-        qa_entry = get_qa_entry(items[task.item_index], task.qa_field, task.qa_type, task.qa_index)
-        qa_entry["model_answer"] = model_answer
-        qa_entry["model_response"] = model_response
-        qa_entry["model_explanation"] = model_explanation
-        qa_entry["is_correct"] = is_correct
-        if task.qa_field == "annotated_qa_pairs" and task.source == "visualization":
-            viz_rel_path = os.path.relpath(task.image_path, image_base_dir)
-            qa_entry["visualization_path"] = viz_rel_path
-            qa_entry["viz_mode"] = args.viz_mode
+    
+    # Execute tasks in parallel using thread pool
+    print(f"Processing with {args.num_workers} workers...")
+    results = []
+    
+    with ThreadPoolExecutor(max_workers=args.num_workers) as executor:
+        # Submit all tasks
+        future_to_task = {
+            executor.submit(process_single_task, task, items, base64_cache, image_base_dir, client, args): task
+            for task in qa_tasks
+        }
+        
+        # Collect results with progress bar
+        for future in tqdm(as_completed(future_to_task), total=len(qa_tasks), desc="Calling GPT model"):
+            try:
+                result = future.result()
+                results.append(result)
+            except Exception as e:
+                task = future_to_task[future]
+                print(f"\nError processing task: {e}")
+                results.append({
+                    "item_index": task.item_index,
+                    "qa_field": task.qa_field,
+                    "qa_type": task.qa_type,
+                    "qa_index": task.qa_index,
+                    "error": str(e),
+                    "model_answer": "Error",
+                    "is_correct": False,
+                })
+    
+    # Merge results back into items
+    for result in results:
+        try:
+            qa_entry = get_qa_entry(items[result["item_index"]], result["qa_field"], 
+                                   result["qa_type"], result["qa_index"])
+            qa_entry["model_answer"] = result.get("model_answer", "Error")
+            qa_entry["model_response"] = result.get("model_response", "")
+            qa_entry["model_explanation"] = result.get("model_explanation", "")
+            qa_entry["is_correct"] = result.get("is_correct", False)
+            
+            if "visualization_path" in result:
+                qa_entry["visualization_path"] = result["visualization_path"]
+            if "viz_mode" in result:
+                qa_entry["viz_mode"] = result["viz_mode"]
+            if "error" in result:
+                qa_entry["error"] = result["error"]
+        except Exception as e:
+            print(f"Error merging result: {e}")
+    
     return items
 
 
@@ -400,26 +523,33 @@ def calculate_accuracy_by_dimension(items: List[Dict[str, Any]]) -> Dict[str, An
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser()
+    """Main entry point for GPT evaluation"""
+    parser = argparse.ArgumentParser(description="GPT-based PhysEdit evaluation with multi-threading")
     parser.add_argument("--input_json_path", type=str, required=True, help="Path to meta_info.json")
     parser.add_argument("--image_base_dir", type=str, default=None, help="Image base directory; defaults to JSON directory")
-    parser.add_argument("--qa_field", type=str, default="annotated_qa_pairs", choices=["qa_pairs", "annotated_qa_pairs"], help="Select qa field")
-    parser.add_argument("--viz_mode", type=str, default="crop_box_and_resize", choices=["draw_box", "crop_box", "crop_box_and_resize"], help="Visualization mode")
+    parser.add_argument("--qa_field", type=str, default="annotated_qa_pairs", 
+                       choices=["qa_pairs", "annotated_qa_pairs"], help="Select qa field")
+    parser.add_argument("--viz_mode", type=str, default="crop_box_and_resize", 
+                       choices=["draw_box", "crop_box", "crop_box_and_resize"], help="Visualization mode")
     parser.add_argument("--max_num", type=int, default=None, help="Maximum samples to process")
     parser.add_argument("--viz_padding", type=int, default=20, help="Padding pixels for crop mode")
     parser.add_argument("--box_color", type=str, default="red", help="Bounding box color")
     parser.add_argument("--log_question_changes", action="store_true", help="Log question mutations")
     parser.add_argument("--img_size", type=int, default=1024, help="Used for output naming consistency")
     parser.add_argument("--api_key", type=str, default="", help="OpenAI API key; overrides OPENAI_API_KEY env")
+    parser.add_argument("--api_base_url", type=str, default="https://api.openai.com/v1", 
+                       help="OpenAI API base URL")
     parser.add_argument("--gpt_model", type=str, default="gpt-5", help="OpenAI multimodal model name")
     parser.add_argument("--max_attempts", type=int, default=5, help="Max call retries")
     parser.add_argument("--retry_backoff", type=float, default=2.0, help="Exponential backoff base")
-    parser.add_argument("--reasoning_effort", type=str, default="low", choices=["low", "medium", "high"], help="OpenAI reasoning effort setting")
+    parser.add_argument("--num_workers", type=int, default=50, help="Number of parallel worker threads")
     args = parser.parse_args()
-
+    
+    # Set default image_base_dir
     if args.image_base_dir is None:
         args.image_base_dir = os.path.dirname(args.input_json_path)
 
+    # Load data
     print(f"Loading data: {args.input_json_path}")
     with open(args.input_json_path, "r", encoding="utf-8") as f:
         data = json.load(f)
@@ -427,7 +557,9 @@ def main() -> None:
     print(f"QA field: {args.qa_field}")
     if args.qa_field == "annotated_qa_pairs":
         print(f"Visualization mode: {args.viz_mode}")
+    print(f"Number of workers: {args.num_workers}")
 
+    # Run evaluation
     print("Running GPT evaluation...")
     results = evaluate_with_gpt(data, args.image_base_dir, args)
 

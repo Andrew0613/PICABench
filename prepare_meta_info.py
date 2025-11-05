@@ -24,7 +24,7 @@ Output:
 import argparse
 import json
 import os
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Dict, List, Optional
 
 from datasets import load_dataset
@@ -64,13 +64,22 @@ def build_meta_item(
     example: Dict[str, Any],
     input_filename: str,
     output_filename: Optional[str],
-    output_dirname: str,
+    output_dir_for_json: str,
 ) -> Dict[str, Any]:
     """Build a single meta_info record"""
+    if output_filename:
+        output_path = (
+            str(PurePosixPath(output_dir_for_json) / output_filename)
+            if output_dir_for_json
+            else output_filename
+        )
+    else:
+        output_path = None
+
     item = {
         "index": idx,
         "input_path": f"input_img/{input_filename}",
-        "output_path": f"{output_dirname}/{output_filename}" if output_filename else None,
+        "output_path": output_path,
         "edit_instruction": example.get("edit_instruction", ""),
         "physics_category": example.get("physics_category", "unknown"),
         "physics_law": example.get("physics_law", "unknown"),
@@ -89,7 +98,7 @@ def main() -> None:
     parser.add_argument(
         "--hf_repo",
         type=str,
-        default="Andrew613/PICABench",
+        default="PICABench",
         help="HuggingFace dataset repository name",
     )
     parser.add_argument(
@@ -121,18 +130,29 @@ def main() -> None:
         action="store_true",
         help="Allow missing output images, still generate JSON (output_path will be null)",
     )
+    parser.add_argument(
+        "--force_input_save",
+        action="store_true",
+        help="Overwrite input images even if they already exist under save_dir/input_img",
+    )
     args = parser.parse_args()
 
-    save_dir = Path(args.save_dir)
+    save_dir = Path(args.save_dir).resolve()
     input_dir = save_dir / "input_img"
     input_dir.mkdir(parents=True, exist_ok=True)
 
     # Output image directory: supports relative path (relative to save_dir) or absolute path
-    output_dir = Path(args.output_image_dir)
-    if not output_dir.is_absolute():
-        output_dir = save_dir / output_dir
-    
-    output_dirname = Path(args.output_image_dir).name  # Use relative path in JSON
+    output_dir_arg = Path(args.output_image_dir)
+    output_dir = output_dir_arg if output_dir_arg.is_absolute() else save_dir / output_dir_arg
+    output_dir = output_dir.resolve()
+
+    try:
+        output_dir_for_json = output_dir.relative_to(save_dir).as_posix()
+    except ValueError:
+        output_dir_for_json = output_dir.as_posix()
+
+    if output_dir_for_json in ("", "."):
+        output_dir_for_json = ""
 
     print(f"Loading dataset: {args.hf_repo} (split={args.split})")
     dataset = load_dataset(args.hf_repo, split=args.split)
@@ -154,7 +174,12 @@ def main() -> None:
                 continue
 
         input_filename = f"{idx:05d}.jpg"
-        save_input_image(input_img, input_dir / input_filename)
+        input_path = input_dir / input_filename
+        if input_path.exists():
+            if args.force_input_save:
+                save_input_image(input_img, input_path)
+        else:
+            save_input_image(input_img, input_path)
 
         # 2. Find corresponding output image
         output_filename = find_output_image(output_dir, idx, args.output_name_pattern)
@@ -164,7 +189,7 @@ def main() -> None:
                 continue  # Skip samples without output images
 
         # 3. Build meta_info entry
-        item = build_meta_item(idx, example, input_filename, output_filename, output_dirname)
+        item = build_meta_item(idx, example, input_filename, output_filename, output_dir_for_json)
         meta_info.append(item)
 
     # Save JSON
@@ -191,4 +216,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

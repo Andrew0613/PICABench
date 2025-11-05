@@ -42,28 +42,34 @@ The leaderboard shows that even top proprietary systems only reach ~60% accuracy
 
 ## ⚡ Quick Start
 
-Evaluate your model's physics-aware editing in 3 steps:
+Evaluate your model's physics-aware editing from a folder of output images in 3 steps:
 
 ```bash
-# 1. Download benchmark data
-huggingface-cli download Andrew613/PICABench \
-  --repo-type dataset \
-  --local-dir PICABench_data
-
-# 2. Install dependencies (choose GPT or Qwen)
-pip install openai Pillow tqdm huggingface_hub  # GPT-5
+# 1) Install dependencies (choose GPT or Qwen)
+pip install openai Pillow tqdm datasets huggingface_hub            # GPT
 # or
-pip install vllm transformers Pillow tqdm       # Qwen/vLLM
+pip install vllm transformers Pillow tqdm datasets huggingface_hub # Qwen/vLLM
 
-# 3. Run evaluation
+# 2) Build meta_info.json from HF dataset + your outputs
+#    (Assume your edited images are under ./outputs as 00000.jpg, 00001.jpg, ...)
+python prepare_meta_info.py \
+  --hf_repo Andrew613/PICABench \
+  --output_image_dir outputs \
+  --save_dir PICABench_data
+
+# 3) Run evaluation (multi-threaded)
 export OPENAI_API_KEY="sk-..."
 python PicaEval_gpt.py \
   --input_json_path PICABench_data/meta_info.json \
-  --image_base_dir PICABench_data \
-  --gpt_model gpt-5
+  --gpt_model gpt-4o \
+  --num_workers 16
 ```
 
-Results will be saved as `meta_info_gpt_output_1024_crop_box_and_resize.json` with per-question accuracy and physics law breakdown.
+Notes:
+- When `meta_info.json` lives in `PICABench_data/`, you can omit `--image_base_dir` (defaults to the JSON directory).
+- If your output images are outside `PICABench_data/`, `prepare_meta_info.py` will write absolute paths and the evaluators will resolve them automatically.
+
+Results are saved as `PICABench_data/meta_info_gpt_output_1024_crop_box_and_resize.json` and the corresponding `_analysis_...json`.
 
 ## Installation
 
@@ -77,11 +83,11 @@ conda activate picabench
 Install dependencies based on your evaluation needs:
 
 ```bash
-# For GPT-5 evaluation
+# For GPT evaluation (multi-threaded with OpenAI SDK)
 pip install openai Pillow tqdm huggingface_hub
 
 # For Qwen evaluation (with vLLM acceleration)
-pip install vllm transformers
+pip install vllm transformers Pillow tqdm
 ```
 
 ## Data Preparation
@@ -96,6 +102,7 @@ pip install datasets pillow tqdm
 
 # 2. Assuming your model outputs are in outputs/ directory with filenames 00000.jpg, 00001.jpg, ...
 python prepare_meta_info.py \
+  --hf_repo Andrew613/PICABench \
   --output_image_dir outputs \
   --save_dir PICABench_data
 
@@ -104,11 +111,14 @@ python prepare_meta_info.py \
 #   PICABench_data/meta_info.json   - Standard format JSON, ready for evaluation
 ```
 
+> ⚠️ Paths inside `meta_info.json` are written relative to the chosen `--save_dir`. Pass that same directory to the evaluators via `--image_base_dir` to avoid duplicate folder segments.
+
 **Parameters:**
 - `--output_image_dir`: Directory containing your model's edited output images
 - `--save_dir`: Root directory to save `meta_info.json` and input images
 - `--output_name_pattern`: Output image filename pattern (default `{index:05d}.jpg`), supports `{index}` placeholder
 - `--allow_missing`: Allow missing output images, still generate JSON (missing samples will have `output_path` set to `null`)
+- `--force_input_save`: Overwrite cached `input_img/*.jpg` files instead of reusing them (default: reuse existing files)
 
 ### `meta_info.json` Format
 
@@ -200,29 +210,36 @@ python PicaEval_gpt.py \
   --qa_field annotated_qa_pairs \
   --viz_mode crop_box_and_resize \
   --gpt_model gpt-5 \
+  --num_workers 50 \
   --max_attempts 5 \
-  --reasoning_effort low
+  --api_base_url https://api.openai.com/v1
 ```
-Outputs:
-- `<meta>_gpt_output_<img_size>[_{mode}].json` – detailed results
-- `<meta>_gpt_analysis_<img_size>[_{mode}].json` – accuracy statistics
 
-Notes:
+**Key Parameters:**
+- `--num_workers`: Number of parallel worker threads (default: 50) for concurrent API requests
+- `--gpt_model`: OpenAI model name (e.g., `gpt-5`, `gpt-4o`, `gpt-4-turbo`)
+- `--api_base_url`: API endpoint URL (default: `https://api.openai.com/v1`)
+- `--max_attempts`: Retry attempts for failed API calls (default: 5)
 
-- Reuses the same JSON schema for inputs/outputs as the Qwen pipeline, enabling direct comparison.
-- Images are base64-encoded and sent as data URLs; be mindful of API quotas and rate limits.
+**Outputs:**
+- `<meta>_gpt_output_<img_size>[_{mode}].json` – detailed results with per-question predictions
+- `<meta>_gpt_analysis_<img_size>[_{mode}].json` – accuracy statistics by physics category, law, and operation
 
-### 3. Non-edited Region Quality
+**Notes:**
+- Uses multi-threaded execution with OpenAI SDK for efficient parallel evaluation
+- Reuses the same JSON schema for inputs/outputs as the Qwen pipeline, enabling direct comparison
+- Images are base64-encoded and sent as data URLs; be mindful of API quotas and rate limits
+
+### 3. Non-edited Region Quality (PSNR)
 
 ```bash
 python PicaEval_consistency.py \
-  --input_json_path /path/to/meta_info.json \
-  --image_base_dir /path/to/images \
-  --qa_field annotated_qa_pairs \      # QA field name
-  --viz_mode crop_box_and_resize       # visualization mode
+  --meta_info_path /path/to/meta_info.json \
+  --base_dir /path/to/images \
+  --size 512
 ```
 
-Produces `<meta>_nonedited_metrics_output.json` and `_analysis.json`, containing masked PSNR/SSIM/LPIPS scores or whole-image fallbacks when edit regions are unavailable.
+Produces `<meta>_psnr_output.json` and `<meta>_psnr_analysis.json`, containing masked PSNR on non-edited regions or whole-image PSNR when edit regions are unavailable.
 
 ## PICA-100K Training Data
 
